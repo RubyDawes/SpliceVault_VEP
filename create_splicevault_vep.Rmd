@@ -1,0 +1,115 @@
+---
+title: "R Notebook"
+output: 
+---
+
+```{r}
+library(data.table)
+library(scales)
+# library(GenomicRanges)
+# library(BSgenome.Hsapiens.UCSC.hg38)
+# library(stringr)
+# library(dplyr)
+```
+# read in 300K-RNA
+
+```{r}
+#splicevault_full = fread('data/300KRNA_ensembl.tsv.gz')
+# filtering to double skipping events & cryptics within +/-600nt
+splicevault = splicevault_full[skipped_exons_count <= 2 | abs(cryptic_distance) <= 600 | splicing_event_class == 'normal splicing']
+```
+
+
+
+# preliminary data processing
+```{r}
+# re-name event type categories as ES (Exon Skipping), CD (Cryptic Donor), CA (Cryptic Acceptor)
+splicevault[grepl('exon skipping', splicing_event_class), SEC := 'ES']
+splicevault[grepl('donor', splicing_event_class), SEC := 'CD']
+splicevault[grepl('acceptor', splicing_event_class), SEC := 'CA']
+
+# do an internal join to add number of samples normal splicing is seen in to every row
+splicevault = splicevault[splicevault[splicing_event_class == 'normal splicing', 
+                                      .(transcript_id, splice_site_pos, ss_type, ns_sample_count = sample_count)], 
+                          on = .(transcript_id, splice_site_pos, ss_type)]
+splicevault[is.na(ns_sample_count), ns_sample_count := 0]
+
+# get percent of samples event is seen is relative to normal splicing - need to do some adjustment to get appropriate digits in percent form
+splicevault[ns_sample_count != 0, sample_ratio := sample_count / ns_sample_count]
+splicevault[, sample_ratio_accuracy:= format(splicevault$sample_ratio, scientific = TRUE)]
+splicevault[, sample_ratio_accuracy := as.numeric(gsub(".*-|.*\\+","",sample_ratio_accuracy))]
+splicevault[, sample_ratio_round := round(sample_ratio, sample_ratio_accuracy)]
+splicevault[, sample_ratio_accuracy:= format(splicevault$sample_ratio_round, scientific = TRUE)]
+splicevault[, sample_ratio_accuracy := as.numeric(gsub(".*-|.*\\+","",sample_ratio_accuracy))]
+
+
+splicevault[sample_ratio_accuracy > 2, sample_ratio_accuracy_adj := 1/(10^(sample_ratio_accuracy - 2))]
+splicevault[sample_ratio_accuracy <= 2, sample_ratio_accuracy_adj := 1]
+splicevault[!is.na(sample_ratio), sample_pct := percent(splicevault[!is.na(sample_ratio)]$sample_ratio, accuracy = splicevault[!is.na(sample_ratio)]$sample_ratio_accuracy_adj)]
+splicevault[ns_sample_count==0, sample_pct := paste0('#', sample_count)]
+
+#annotate events as inframe/frameshift
+splicevault[, frame := ifelse(missplicing_inframe, 'inFrame', 'Frameshift')]
+
+# get missplicing event rank (i.e. excluding normal splicing). note that normal splicing isn't necessarily ranked 1 at every splice-site
+splicevault[splicing_event_class != 'normal splicing', event_rank_ms := rowid(splice_site_pos, ss_type, transcript_id)]
+
+splicevault[, cryptic_distance := as.character(cryptic_distance)]
+splicevault[SEC %in% c('CD', 'CA') & ! grepl('\\-',cryptic_distance), cryptic_distance := paste0('+',cryptic_distance)]
+```
+
+
+
+# reformatting to wide- VEP additional columns
+
+```{r}
+
+splicevaultVEP = splicevault[!is.na(SEC) & event_rank_ms <= 4, 
+                                .(sv_annotatedSplicingSampleCount = unique(ns_sample_count),
+                                  sv_top4_outOfFrame = length(which(missplicing_inframe == 'FALSE')),
+                                  sv_top1 = paste(SEC[event_rank_ms == 1], 
+                                                  ifelse(SEC[event_rank_ms == 1] == 'ES', skipped_exons_id[event_rank_ms == 1], 
+                                                         cryptic_distance[event_rank_ms == 1]), 
+                                                  sample_pct[event_rank_ms == 1], frame[event_rank_ms == 1], sep = ';'),
+                                  sv_top2 = paste(SEC[event_rank_ms == 2], 
+                                                  ifelse(SEC[event_rank_ms == 2] == 'ES', skipped_exons_id[event_rank_ms == 2], 
+                                                         cryptic_distance[event_rank_ms == 2]), 
+                                                  sample_pct[event_rank_ms == 2], frame[event_rank_ms == 2], sep = ';'),
+                                  sv_top3 = paste(SEC[event_rank_ms == 3], 
+                                                  ifelse(SEC[event_rank_ms == 3] == 'ES', skipped_exons_id[event_rank_ms == 3], 
+                                                         cryptic_distance[event_rank_ms == 3]), 
+                                                  sample_pct[event_rank_ms == 3], frame[event_rank_ms == 3], sep = ';'),
+                                  sv_top4 = paste(SEC[event_rank_ms == 4], 
+                                                  ifelse(SEC[event_rank_ms == 4] == 'ES', skipped_exons_id[event_rank_ms == 4], 
+                                                         cryptic_distance[event_rank_ms == 4]), 
+                                                  sample_pct[event_rank_ms == 4], frame[event_rank_ms == 4], sep = ';')),
+                                by = .(transcript_id, splice_site_pos, ss_type, strand)]
+```
+
+# get chromosome for each transcript
+
+```{r}
+# gtf <- rtracklayer::import('data/Homo_sapiens.GRCh38.110.chr.gtf.gz')
+# gtf_dt = as.data.table(gtf)
+# tx_chroms = unique(gtf_dt[type == 'transcript', .(transcript_id = transcript_id, chrom = paste0('chr', seqnames))])
+# fwrite(tx_chroms, 'data/tx_chroms.csv')
+tx_chroms = fread('data/tx_chroms.csv')
+splicevaultVEP = tx_chroms[splicevaultVEP, on = .(transcript_id)]
+```
+
+```{r}
+
+# expand splicevault splice_site_pos to cover range of splice region variant positions (-3:+8 for donor, -17:+3 for acceptor)
+splicevaultVEP[ss_type == 'acceptor',  `:=` (start = ifelse(strand == '+', splice_site_pos - 16, splice_site_pos -3), 
+                                                end = ifelse(strand == '+', splice_site_pos + 3, splice_site_pos + 16))]
+splicevaultVEP[ss_type == 'donor',  `:=` (start = ifelse(strand == '+', splice_site_pos - 3, splice_site_pos -7), 
+                                                end = ifelse(strand == '+', splice_site_pos + 7, splice_site_pos +3))]
+splicevaultVEP[, genomic_range := paste0(start, '-', end)]
+
+setorder(splicevaultVEP, chrom, start, transcript_id)
+
+splicevaultVEP_final = splicevaultVEP[, .(Feature = transcript_id, chrom, genomic_range, sv_annotatedSplicingSampleCount, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+
+fwrite(splicevaultVEP_final, 'output/splicevault_vep.tsv.gz')
+```
+

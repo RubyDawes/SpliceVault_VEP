@@ -1,0 +1,137 @@
+---
+title: "R Notebook"
+output: 
+---
+
+
+```{r}
+library(data.table)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(stringr)
+```
+
+```{r}
+# making helper files from ensembl GTF
+gtf <- rtracklayer::import('data/Homo_sapiens.GRCh38.108.chr.gtf.gz')
+gtf_dt = as.data.table(gtf)
+
+
+exons = GRanges(gtf_dt[type == 'exon', .(seqnames = transcript_id, start, end, width , strand, exon_number)])
+transcripts = GRanges(gtf_dt[type == 'transcript', .(seqnames = transcript_id, start, end, width , strand)])
+
+introns = GenomicRanges::setdiff(transcripts, exons)
+introns_dt = as.data.table(introns)
+introns_dt[, width := NULL]
+```
+
+
+```{r}
+# read in Splicevault
+splicevault = fread('data/splicevault_sample.tsv.gz')
+splicevault = splicevault[event_rank <= 5]
+
+splicevault[, event_id := paste(tx_id, ss_type, exon_no, 'top', event_rank, sep = '_')]
+#splicevault = splicevault[event_id == 'ENST00000211379_acceptor_2_top_2']
+
+splicevault_eg = splicevault[splicing_event_class != 'normal splicing', 
+                                        .(seqnames = tx_id, start = ifelse(strand == '+', donor_pos, acceptor_pos), 
+                                          end =ifelse(strand == '+', acceptor_pos, donor_pos), strand, event_rank,
+                                          event_id)]
+
+```
+
+
+
+```{r}
+# make transcripts bounds file
+transcripts_sv = unique(gtf_dt[type == 'transcript', .(seqnames = transcript_id, start, end, chrommask = seqnames, strand)])[unique(splicevault_eg[, .(seqnames, event_id)]), on = .(seqnames)]
+setnames(transcripts_sv, c('seqnames', 'event_id'), c('tx_id', 'seqnames'))
+
+# make CDS boundaries file
+cds_bounds = gtf_dt[type == 'CDS', .(start = min(start), end = max(end)), by = .(seqnames = transcript_id, strand)][unique(splicevault_eg[, .(seqnames, event_id)]), on = .(seqnames)]
+setnames(cds_bounds, c('seqnames', 'event_id'), c('tx_id', 'seqnames'))
+cds_bounds = cds_bounds[!is.na(start)]
+
+```
+
+
+```{r}
+# reformatting splicevault
+# for each splicevault event, need to match with all introns for that transcript
+introns_dt_sv = introns_dt[splicevault_eg, on = .(seqnames), allow.cartesian = TRUE]
+introns_dt_sv[start == i.start | end == i.end | (start >= i.start & end <= i.end), `:=` (start = i.start, end = i.end)]
+introns_dt_sv[, `:=` (i.start = NULL, i.end = NULL, i.strand = NULL)]
+introns_dt_sv = unique(introns_dt_sv)
+setnames(introns_dt_sv, c('seqnames', 'event_id'), c('tx_id', 'seqnames'))
+```
+
+
+```{r}
+# flip coordinates to now be exons corresponding to introns within transcript boundaries
+exons_sv = GenomicRanges::setdiff(GRanges(transcripts_sv), GRanges(introns_dt_sv))
+
+# filter exons to coordinates within CDS bounds for that transcript
+cds_exons_sv = GenomicRanges::intersect(exons_sv, GRanges(cds_bounds))
+
+
+# get chromosome of transcript so i can retrieve sequence
+cds_exons_sv = as.data.table(cds_exons_sv)
+cds_exons_sv = cds_exons_sv[transcripts_sv[, .(seqnames, chrom = chrommask)], on = .(seqnames)]
+cds_exons_sv[, chrom := paste('chr',chrom, sep = '')]
+setnames(cds_exons_sv, 'seqnames', 'event_id')
+
+# Get the genomic sequences for the exons
+cds_exons_sv = cds_exons_sv[!is.na(start)] # remove events on noncoding transcripts
+exon_seqs <- getSeq(BSgenome.Hsapiens.UCSC.hg38, GRanges(cds_exons_sv))
+cds_exons_sv[, seq := as.character(exon_seqs)]
+#cds_exons_sv[strand == '-', seq := as.character(reverseComplement(DNAStringSet(cds_exons_sv[strand == '-', seq])))]
+
+```
+
+
+```{r}
+cds_exons_sv[, exon_number := rowid(event_id)]
+cds_exons_sv[, nexon := max(exon_number), by = .(event_id)]
+cds_exons_sv[strand == '-', exon_number := nexon - exon_number + 1]
+
+setorder(cds_exons_sv, event_id, exon_number)
+
+
+# collapse exonic sequence and translate
+cds_seq_sv = cds_exons_sv[, .(seq = paste0(seq, collapse = '')), by = .(event_id)]
+translated_seqs <- suppressWarnings(Biostrings::translate(DNAStringSet(cds_seq_sv$seq)))
+
+cds_seq_sv[, aa_seq := as.character(translated_seqs)]
+
+cds_seq_sv[, seq_length := nchar(seq)]
+cds_seq_sv[, seq_length_remainder := seq_length %% 3]
+
+cds_seq_sv[, ptv_loc := sapply(gregexpr(pattern ='*',cds_seq_sv$aa_seq, fixed = TRUE), '[[', 1)]
+cds_seq_sv[ptv_loc == '-1', ptv_loc := NA]
+
+4590/8685
+splicevault[, .(event_id, missplicing_inframe)][cds_seq_sv[is.na(ptv_loc)], on = .(event_id)][missplicing_inframe == FALSE]
+cds_seq_sv[event_id == 'ENST00000230582_acceptor_7_top_5']
+
+splicevault[, .(event_id, missplicing_inframe)][cds_seq_sv[!is.na(ptv_loc)], on = .(event_id)][missplicing_inframe == TRUE]
+
+cds_seq_sv[is.na(ptv_loc)]
+splicevault[event_id == 'ENST00000488383_acceptor_3_top_3']
+
+
+```
+
+
+# remove splicevault annotations for nonsense mediated decay transcripts?
+# keep only for protein coding transcripts?
+
+
+# 50 bp rule
+# non stop decay
+# need to detect start skipped
+
+
+
+
+
