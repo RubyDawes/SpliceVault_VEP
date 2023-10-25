@@ -1,0 +1,34 @@
+---
+title: "R Notebook"
+output: 
+---
+
+```{r}
+library(data.table)
+library(GenomicRanges)
+```
+
+
+```{r}
+splicevault_vep = fread('output/splicevault_vep.tsv.gz')
+spliceai_ssloss = fread('data/spliceai_ssloss.txt.gz', sep = '\t', col.names = c('chrom', 'pos', NA, 'ref', 'alt', NA, NA, 'score'))
+
+
+splicevault_vep[, start := as.numeric(sapply(strsplit(genomic_range, '\\-'), '[[', 1))]
+splicevault_vep[, end := as.numeric(sapply(strsplit(genomic_range, '\\-'), '[[', 2))]
+
+spliceai_ssloss[, chrom := paste0('chr', chrom)]
+spliceai_ssloss[, `:=` (start = pos, end = pos)]
+spliceai_ssloss_pos = unique(spliceai_ssloss[, .(chrom, pos, ref, alt, start, end)])
+spliceai_ssloss[pos== 8943542]
+
+setkey(splicevault_vep, chrom, start, end)
+splicevault_vep_pos = foverlaps(spliceai_ssloss_pos, splicevault_vep, type = 'within')
+splicevault_vep_pos = splicevault_vep_pos[!is.na(genomic_range)]
+splicevault_vep_pos[, `:=` (start = NULL, end = NULL, i.start = NULL, i.end = NULL)]
+
+splicevault_vep_saisnps = splicevault_vep_pos[, .(chrom, Feature, pos, ref, alt, sv_annotatedSplicingSampleCount, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+fwrite(splicevault_vep_saisnps, 'output/splicevault_vep_saisnps.tsv.gz')
+
+```
+
