@@ -20,7 +20,6 @@ splicevault_vep[, end := as.numeric(sapply(strsplit(genomic_range, '\\-'), '[[',
 spliceai_ssloss[, chrom := paste0('chr', chrom)]
 spliceai_ssloss[, `:=` (start = pos, end = pos)]
 spliceai_ssloss_pos = unique(spliceai_ssloss[, .(chrom, pos, ref, alt, start, end)])
-spliceai_ssloss[pos== 8943542]
 
 setkey(splicevault_vep, chrom, start, end)
 splicevault_vep_pos = foverlaps(spliceai_ssloss_pos, splicevault_vep, type = 'within')
