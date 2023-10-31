@@ -13,9 +13,12 @@ library(stringr)
 
 ```{r}
 # making helper files from ensembl GTF
-gtf <- rtracklayer::import('data/Homo_sapiens.GRCh38.108.chr.gtf.gz')
-gtf_dt = as.data.table(gtf)
+# gtf <- rtracklayer::import('data/Homo_sapiens.GRCh38.110.chr.gtf.gz')
+# gtf_dt = as.data.table(gtf)
+tx_id_keep = gtf_dt[type == 'transcript' & transcript_biotype %in% c('lncRNA', 'protein_coding'), transcript_id]
 
+
+gtf_dt = gtf_dt[transcript_id %in% tx_id_keep]
 
 exons = GRanges(gtf_dt[type == 'exon', .(seqnames = transcript_id, start, end, width , strand, exon_number)])
 transcripts = GRanges(gtf_dt[type == 'transcript', .(seqnames = transcript_id, start, end, width , strand)])
@@ -28,30 +31,114 @@ introns_dt[, width := NULL]
 
 ```{r}
 # read in Splicevault
-splicevault = fread('data/splicevault_sample.tsv.gz')
-splicevault = splicevault[event_rank <= 5]
+# splicevault = fread('data/300KRNA_ensembl.tsv.gz')
+# splicevault_save = splicevault
 
-splicevault[, event_id := paste(tx_id, ss_type, exon_no, 'top', event_rank, sep = '_')]
-#splicevault = splicevault[event_id == 'ENST00000211379_acceptor_2_top_2']
+splicevault = splicevault_save[skipped_exons_count <= 2 | abs(cryptic_distance) <= 600 | splicing_event_class == 'normal splicing']
+splicevault = splicevault[transcript_id %in% tx_id_keep]
+splicevault[splicing_event_class != 'normal splicing', event_rank_ms := rowid(splice_site_pos, ss_type, transcript_id)]
 
-splicevault_eg = splicevault[splicing_event_class != 'normal splicing', 
-                                        .(seqnames = tx_id, start = ifelse(strand == '+', donor_pos, acceptor_pos), 
+splicevault = splicevault[event_rank_ms <= 4]
+unique_ss = unique(splicevault[, .(splice_site_pos, transcript_id)])
+splicevault[, event_id := paste(transcript_id, chr, ss_type, exon_no, 'top', event_rank_ms, sep = '_')]
+
+splicevault_sample = splicevault[unique_ss[sample(1:nrow(unique_ss), size = 100000)], on = .(splice_site_pos, transcript_id)]
+
+#splicevault_sample = splicevault[event_id == 'ENST00000456861_11_acceptor_2_top_2']
+
+
+## find nt change in transcript from event - insertion/deletion
+insertions = splicevault_sample[(ss_type == 'donor' & cryptic_distance > 0) | (ss_type == 'acceptor' & cryptic_distance < 0)] # insertions
+insertions[ss_type == 'donor', cdna_change := cryptic_distance - 1]
+insertions[ss_type == 'acceptor', cdna_change := -cryptic_distance - 1]
+
+deletions = splicevault_sample[(ss_type == 'donor' & cryptic_distance < 0) | (ss_type == 'acceptor' & cryptic_distance > 0) | (skipped_exons_id != '')] # deletions
+deletions[ss_type == 'donor' & skipped_exons_id == '', cdna_change := cryptic_distance]
+deletions[ss_type == 'acceptor' & skipped_exons_id == '', cdna_change := -cryptic_distance ]
+
+skipped_exons_length = deletions[skipped_exons_id != '', .(event_id, transcript_id,
+                                                           start = ifelse(strand == '+', donor_pos, acceptor_pos),
+                                                           end = ifelse(strand == '+', acceptor_pos, donor_pos))]
+
+
+exons_to_skip = gtf_dt[type == 'exon', .(transcript_id, start, end)]
+setkey(skipped_exons_length, transcript_id, start, end)
+skipped_exons_length = foverlaps(exons_to_skip, skipped_exons_length, type = 'within')
+skipped_exons_length = skipped_exons_length[!is.na(event_id)]
+skipped_exons_length[, exon_length := i.end - i.start + 1]
+skipped_exons_length = skipped_exons_length[, .(skipped_exons_length = sum(exon_length)), by = .(event_id)]
+
+deletions = skipped_exons_length[deletions, on = .(event_id)]
+deletions[skipped_exons_id != '', cdna_change := -skipped_exons_length]
+deletions[, skipped_exons_length := NULL]
+
+splicevault_sample = rbind(insertions, deletions)
+```
+
+```{r}
+splicevault_eg = splicevault_sample[splicing_event_class != 'normal splicing', 
+                                        .(seqnames = transcript_id, chrmask = chr, start = ifelse(strand == '+', donor_pos, acceptor_pos), 
                                           end =ifelse(strand == '+', acceptor_pos, donor_pos), strand, event_rank,
-                                          event_id)]
-
+                                          event_id, splice_site_pos, cdna_change)]
 ```
 
 
 
 ```{r}
-# make transcripts bounds file
-transcripts_sv = unique(gtf_dt[type == 'transcript', .(seqnames = transcript_id, start, end, chrommask = seqnames, strand)])[unique(splicevault_eg[, .(seqnames, event_id)]), on = .(seqnames)]
-setnames(transcripts_sv, c('seqnames', 'event_id'), c('tx_id', 'seqnames'))
-
 # make CDS boundaries file
 cds_bounds = gtf_dt[type == 'CDS', .(start = min(start), end = max(end)), by = .(seqnames = transcript_id, strand)][unique(splicevault_eg[, .(seqnames, event_id)]), on = .(seqnames)]
-setnames(cds_bounds, c('seqnames', 'event_id'), c('tx_id', 'seqnames'))
+setnames(cds_bounds, c('seqnames', 'event_id'), c('transcript_id', 'seqnames'))
 cds_bounds = cds_bounds[!is.na(start)]
+
+
+# seperate out: all events on non-coding transcripts, all events within UTR bounds, where normal splicing is also entirely within UTR bounds
+splicevault_no_coding_conseq = splicevault_eg[seqnames %in% gtf_dt[transcript_biotype == 'lncRNA', transcript_id]]
+splicevault_eg = splicevault_eg[!event_id %in% splicevault_no_coding_conseq$event_id]
+```
+
+```{r}
+# check if splice_site_pos is within CDS bounds - if not, check if event start and end are also not within CDS bounds- add to no_coding_consequence
+setkey(cds_bounds, seqnames, start, end)
+splicevault_eg_sscdsoverlap = foverlaps(splicevault_eg[, .(seqnames = event_id, start = splice_site_pos, end = splice_site_pos)],cds_bounds, type = 'within')
+ss_outside_cds = splicevault_eg_sscdsoverlap[is.na(transcript_id), seqnames]
+
+event_cds_check = splicevault_eg[event_id %in% ss_outside_cds]
+event_cds_check_overlap = foverlaps(event_cds_check[, .(seqnames = event_id, start, end, strand, event_rank)], cds_bounds, type = 'any') # check if either start or end of event SJ are within CDS - if both are outside, safe to shunt these to no_coding_conseq
+event_nocds = splicevault_eg[event_id %in% event_cds_check_overlap[is.na(transcript_id), seqnames]]
+splicevault_no_coding_conseq = rbind(splicevault_no_coding_conseq, event_nocds)
+splicevault_eg = splicevault_eg[!event_id %in% event_nocds$event_id]
+```
+
+
+
+```{r}
+# check for start loss or stop loss- two scenarios:
+# 1. normal splicing is within CDS, and either start or end of event SJ are outside CDS
+# 2. normal splicing is outside CDS, and either start or end of event SJ are inside CDS
+splicevault_eg_sscdsoverlap = foverlaps(splicevault_eg[, .(seqnames = event_id, start = splice_site_pos, end = splice_site_pos)],cds_bounds, type = 'within') # check if splice-site is within CDS (if annotated splice-site is, the other end of the SJ must also necessarily be)
+
+# ACTUALLY NOTE TO SELF: check for transcripts where there's an intron within the start/stop codon
+
+
+splicevault_eg_mscdsoverlap_any = foverlaps(splicevault_eg[, .(seqnames = event_id, start, end, strand, event_rank)], cds_bounds, type = 'any') # check if either start or end of event SJ are within CDS 
+splicevault_eg_mscdsoverlap_within = foverlaps(splicevault_eg[, .(seqnames = event_id, start, end, strand, event_rank)], cds_bounds, type = 'within') # check if  start AND end of event SJ are within CDS 
+# scenario 1- 
+cds_boundary_loss_type1 = intersect(splicevault_eg_sscdsoverlap[!is.na(transcript_id),seqnames], splicevault_eg_mscdsoverlap_within[is.na(transcript_id),seqnames])
+# scenario 2-    
+cds_boundary_loss_type2 = intersect(splicevault_eg_sscdsoverlap[is.na(transcript_id),seqnames], splicevault_eg_mscdsoverlap_any[!is.na(transcript_id),seqnames])
+
+cds_boundary_loss = splicevault_eg[event_id %in% c(cds_boundary_loss_type1, cds_boundary_loss_type2)]
+
+# we are left with events where the splice-site is within the CDS, and both ends of the SJ are within CDS bounds- on these, we'll calculate the effect of the event on the CDS (i.e. frameshift/PTC etc)
+splicevault_eg = splicevault_eg[!event_id %in% c(cds_boundary_loss_type1, cds_boundary_loss_type2)]
+# the other events we still have to look at - splicevault_no_coding_conseq (UTR or non-coding insertion/deletion), cds_boundary_loss (start loss, stop loss). 
+```
+
+# CDS check- end options are PTC, PTC_50bp_NMD_escape, in_frame_insertion, in_frame_deletion, non_stop
+```{r}
+# make transcripts bounds file
+transcripts_sv = unique(gtf_dt[type == 'transcript', .(seqnames = transcript_id, start, end, chrommask = seqnames, strand)])[unique(splicevault_eg[, .(seqnames, event_id)]), on = .(seqnames)]
+setnames(transcripts_sv, c('seqnames', 'event_id'), c('transcript_id', 'seqnames'))
 
 ```
 
@@ -63,9 +150,8 @@ introns_dt_sv = introns_dt[splicevault_eg, on = .(seqnames), allow.cartesian = T
 introns_dt_sv[start == i.start | end == i.end | (start >= i.start & end <= i.end), `:=` (start = i.start, end = i.end)]
 introns_dt_sv[, `:=` (i.start = NULL, i.end = NULL, i.strand = NULL)]
 introns_dt_sv = unique(introns_dt_sv)
-setnames(introns_dt_sv, c('seqnames', 'event_id'), c('tx_id', 'seqnames'))
+setnames(introns_dt_sv, c('seqnames', 'event_id'), c('transcript_id', 'seqnames'))
 ```
-
 
 ```{r}
 # flip coordinates to now be exons corresponding to introns within transcript boundaries
@@ -85,8 +171,6 @@ setnames(cds_exons_sv, 'seqnames', 'event_id')
 cds_exons_sv = cds_exons_sv[!is.na(start)] # remove events on noncoding transcripts
 exon_seqs <- getSeq(BSgenome.Hsapiens.UCSC.hg38, GRanges(cds_exons_sv))
 cds_exons_sv[, seq := as.character(exon_seqs)]
-#cds_exons_sv[strand == '-', seq := as.character(reverseComplement(DNAStringSet(cds_exons_sv[strand == '-', seq])))]
-
 ```
 
 
@@ -101,22 +185,132 @@ setorder(cds_exons_sv, event_id, exon_number)
 # collapse exonic sequence and translate
 cds_seq_sv = cds_exons_sv[, .(seq = paste0(seq, collapse = '')), by = .(event_id)]
 translated_seqs <- suppressWarnings(Biostrings::translate(DNAStringSet(cds_seq_sv$seq)))
-
 cds_seq_sv[, aa_seq := as.character(translated_seqs)]
 
 cds_seq_sv[, seq_length := nchar(seq)]
 cds_seq_sv[, seq_length_remainder := seq_length %% 3]
 
-cds_seq_sv[, ptv_loc := sapply(gregexpr(pattern ='*',cds_seq_sv$aa_seq, fixed = TRUE), '[[', 1)]
-cds_seq_sv[ptv_loc == '-1', ptv_loc := NA]
+cds_seq_sv[, ptc_loc := sapply(gregexpr(pattern ='*',cds_seq_sv$aa_seq, fixed = TRUE), '[[', 1)]
+cds_seq_sv[ptc_loc == '-1', ptc_loc := NA]
+```
 
+# CDS check- end options are PTC, PTC_50bp_NMD_escape, in_frame_insertion, in_frame_deletion, non_stop
+
+```{r}
+# doesn't have a PTC within CDS bounds- figure out in-frame insertion/deletion or non stop (or new stop is between CDS end and cDNA end)
+
+# in frame
+in_frame_indels = splicevault[event_id %in% cds_seq_sv[is.na(ptc_loc) & seq_length_remainder == 0, event_id]]
+
+# insertions
+in_frame_insertions = in_frame_indels[(ss_type == 'donor' & cryptic_distance > 0) | (ss_type == 'acceptor' & cryptic_distance < 0)]
+
+# deletions
+in_frame_deletions = in_frame_indels[(ss_type == 'donor' & cryptic_distance < 0) | (ss_type == 'acceptor' & cryptic_distance > 0) | (skipped_exons_id != '')]
+
+
+```
+
+```{r}
+
+# out of frame
+frameshift_noptc = cds_seq_sv[is.na(ptc_loc) & seq_length_remainder != 0]
+frameshift_noptc[, transcript_id := sapply(strsplit(event_id, '_'),'[[', 1)]
+
+#need to get sequence between CDS end and transcript end
+three_prime_utr_seq = gtf_dt[type %in%  c('stop_codon','three_prime_utr')& transcript_id %in% frameshift_noptc$transcript_id , .(transcript_id, seqnames, start, end, strand)]
+# collapsing stop codon and 3'UTR seq by transcript
+#three_prime_utr_seq = GenomicRanges::reduce(GRanges(three_prime_utr_seq))
+three_prime_utr_seq[, seqnames := paste0('chr', seqnames)]
+
+# getting sequence
+three_prime_utr_seqs <- getSeq(BSgenome.Hsapiens.UCSC.hg38, GRanges(three_prime_utr_seq))
+three_prime_utr_seq[, utr_seq := as.character(three_prime_utr_seqs)]
+three_prime_utr_seq = three_prime_utr_seq[, .(utr_seq = paste0(utr_seq, collapse = '')), by = .(transcript_id)]
+
+# adding UTR seq to sv event seq
+frameshift_noptc = frameshift_noptc[three_prime_utr_seq[, .(transcript_id, utr_seq)], on = .(transcript_id)]
+frameshift_noptc[, extended_seq := paste0(seq, utr_seq)]
+
+# translate extended seq
+translated_extended_seqs <- suppressWarnings(Biostrings::translate(DNAStringSet(frameshift_noptc$extended_seq)))
+frameshift_noptc[, aa_seq_extended := as.character(translated_extended_seqs)]
+
+frameshift_noptc[, ptc_loc_extended := sapply(gregexpr(pattern ='*',translated_extended_seqs, fixed = TRUE), '[[', 1)]
+frameshift_noptc[ptc_loc_extended == '-1', ptc_loc_extended := NA]
+
+non_stop = frameshift_noptc[is.na(ptc_loc_extended)]
+
+frameshift_extension = frameshift_noptc[!is.na(ptc_loc_extended)]
+```
+
+```{r}
+# has a PTC - figure out PTC or NMD escape
+PTC = cds_seq_sv[!is.na(ptc_loc)]
+
+## 1. find cDNA position of penultimate exon donor - 50bp in transcript
+# grab transcript exons
+cdna_converter = gtf_dt[type == 'exon', .(transcript_id, seqnames, strand, start, end, exon_number, width)]
+# set the order by exon number so we don't have to worry about strand
+cdna_converter[, exon_number := as.numeric(exon_number)]
+setorder(cdna_converter, transcript_id, exon_number)
+#add the cumulative width of exons up to that exon number- that's cDNA position at the end of the exon
+cdna_converter = cdna_converter[, .(exon_end_cdna = cumsum(width), start = start, end = end, width = width, exon_number = exon_number), by = .(transcript_id,strand, seqnames)]
+cdna_converter[, nexon := max(exon_number), by = transcript_id]
+
+# get cdna position of the end of the penultimate exon
+cdna_penultimate_exon = cdna_converter[exon_number == nexon - 1, .(transcript_id, exon_end_cdna, penultimate_exon_number = exon_number)]
+cdna_penultimate_exon[, NMD_cutoff := exon_end_cdna - 50]
+```
+
+
+```{r}
+## 2. adjust cDNA position of NMD cutoff according to event change to transcript
+cdna_change_adjust = cdna_penultimate_exon[splicevault_eg[event_id %in% PTC$event_id, .(transcript_id = seqnames, 
+                                                                                        event_id, cdna_change)], 
+                                           on = .(transcript_id)]
+# check if splicevault event is at last donor/acceptor- will be beyond PTC cutoff
+cdna_change_adjust[, sv_intron_number := as.numeric(sapply(strsplit(event_id, '_'), '[[', 4))]
+#cdna_change_adjust = cdna_change_adjust[sv_intron_number < penultimate_exon_number]
+cdna_change_adjust[, NMD_cutoff_adjust := NMD_cutoff + cdna_change]
+cdna_change_adjust[NMD_cutoff_adjust < 0]
+
+## 3. see if PTV position falls afterwards
+PTC_NMD = PTC[cdna_change_adjust, on = .(event_id)]
+PTC_escape = PTC_NMD[sv_intron_number >=  penultimate_exon_number | ptc_loc >= NMD_cutoff_adjust]
+PTC_NMD = PTC_NMD[! event_id %in% PTC_escape$event_id]
+```
+
+# endpoints:
+# splicevault_no_coding_conseq (UTR or non-coding insertion/deletion)
+# cds_boundary_loss (start loss, stop loss)
+# in_frame_insertion, in_frame_deletion
+# PTC_NMD
+# PTC_escape, 
+# non_stop
+# frameshift_extensions
+
+```{r}
+nrow(splicevault_no_coding_conseq) + nrow(cds_boundary_loss) + nrow(in_frame_insertions) + nrow(in_frame_deletions) + nrow(PTC_NMD) + nrow(PTC_escape) + nrow(non_stop) + nrow(frameshift_extension)
+nrow(splicevault_eg)
+```
+
+```{r}
+cds_seq_sv[is.na(ptc_loc)]
+cds_seq_sv[grepl('ENST00000000233_donor_1', event_id)]
+
+splicevault[transcript_id == 'ENST00000000233' & ss_type == 'donor' & splice_site_pos == 127588566]
+```
+
+
+```{r}
 4590/8685
-splicevault[, .(event_id, missplicing_inframe)][cds_seq_sv[is.na(ptv_loc)], on = .(event_id)][missplicing_inframe == FALSE]
+splicevault[, .(event_id, missplicing_inframe)][cds_seq_sv[is.na(ptc_loc)], on = .(event_id)][missplicing_inframe == FALSE]
 cds_seq_sv[event_id == 'ENST00000230582_acceptor_7_top_5']
 
-splicevault[, .(event_id, missplicing_inframe)][cds_seq_sv[!is.na(ptv_loc)], on = .(event_id)][missplicing_inframe == TRUE]
+splicevault[, .(event_id, missplicing_inframe)][cds_seq_sv[!is.na(ptc_loc)], on = .(event_id)][missplicing_inframe == TRUE]
 
-cds_seq_sv[is.na(ptv_loc)]
+cds_seq_sv[is.na(ptc_loc)]
 splicevault[event_id == 'ENST00000488383_acceptor_3_top_3']
 
 
