@@ -6,15 +6,11 @@ output:
 ```{r}
 library(data.table)
 library(scales)
-# library(GenomicRanges)
-# library(BSgenome.Hsapiens.UCSC.hg38)
-# library(stringr)
-# library(dplyr)
 ```
 # read in 300K-RNA
 
 ```{r}
-#splicevault_full = fread('data/300KRNA_ensembl.tsv.gz')
+splicevault_full = fread('data/300KRNA_ensembl_maxreads.tsv.gz')
 # filtering to double skipping events & cryptics within +/-600nt
 splicevault = splicevault_full[skipped_exons_count <= 2 | abs(cryptic_distance) <= 600 | splicing_event_class == 'normal splicing']
 ```
@@ -30,9 +26,10 @@ splicevault[grepl('acceptor', splicing_event_class), SEC := 'CA']
 
 # do an internal join to add number of samples normal splicing is seen in to every row
 splicevault = splicevault[splicevault[splicing_event_class == 'normal splicing', 
-                                      .(transcript_id, splice_site_pos, ss_type, ns_sample_count = sample_count)], 
+                                      .(transcript_id, splice_site_pos, ss_type, ns_sample_count = sample_count, ns_max_reads = max_reads)], 
                           on = .(transcript_id, splice_site_pos, ss_type)]
 splicevault[is.na(ns_sample_count), ns_sample_count := 0]
+splicevault[is.na(ns_max_reads), ns_max_reads := 0]
 
 # get percent of samples event is seen is relative to normal splicing - need to do some adjustment to get appropriate digits in percent form
 splicevault[ns_sample_count != 0, sample_ratio := sample_count / ns_sample_count]
@@ -56,6 +53,7 @@ splicevault[splicing_event_class != 'normal splicing', event_rank_ms := rowid(sp
 
 splicevault[, cryptic_distance := as.character(cryptic_distance)]
 splicevault[SEC %in% c('CD', 'CA') & ! grepl('\\-',cryptic_distance), cryptic_distance := paste0('+',cryptic_distance)]
+
 ```
 
 
@@ -66,6 +64,7 @@ splicevault[SEC %in% c('CD', 'CA') & ! grepl('\\-',cryptic_distance), cryptic_di
 
 splicevaultVEP = splicevault[!is.na(SEC) & event_rank_ms <= 4, 
                                 .(sv_annotatedSplicingSampleCount = unique(ns_sample_count),
+                                  sv_annotatedSplicingMaxReadsGTEx = unique(ns_max_reads),
                                   sv_top4_outOfFrame = length(which(missplicing_inframe == 'FALSE')),
                                   sv_top1 = paste(SEC[event_rank_ms == 1], 
                                                   ifelse(SEC[event_rank_ms == 1] == 'ES', skipped_exons_id[event_rank_ms == 1], 
@@ -108,8 +107,9 @@ splicevaultVEP[, genomic_range := paste0(start, '-', end)]
 
 setorder(splicevaultVEP, chrom, start, transcript_id)
 
-splicevaultVEP_final = splicevaultVEP[, .(Feature = transcript_id, chrom, genomic_range, sv_annotatedSplicingSampleCount, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+splicevaultVEP_final = splicevaultVEP[, .(Feature = transcript_id, chrom, genomic_range, sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
 
 fwrite(splicevaultVEP_final, 'output/splicevault_vep.tsv.gz')
 ```
+
 

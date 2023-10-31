@@ -27,7 +27,7 @@ splicevault_vep_pos = foverlaps(spliceai_ssloss_pos, splicevault_vep, type = 'wi
 splicevault_vep_pos = splicevault_vep_pos[!is.na(genomic_range)]
 splicevault_vep_pos[, `:=` (start = NULL, end = NULL, i.start = NULL, i.end = NULL)]
 
-splicevault_vep_saisnps = splicevault_vep_pos[, .(chrom, Feature, pos, ref, alt, sv_annotatedSplicingSampleCount, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+splicevault_vep_saisnps = splicevault_vep_pos[, .(chrom, Feature, pos, ref, alt, sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
 fwrite(splicevault_vep_saisnps, 'output/splicevault_vep_saisnps.tsv.gz')
 
 ```

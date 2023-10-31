@@ -1,0 +1,67 @@
+---
+title: "R Notebook"
+output: 
+---
+
+```{r}
+library(data.table)
+```
+
+
+```{r}
+maxreads = fread('data/junctions_chrom_maxreads.txt', col.names = c('jid', 'chrom', 'start', 'end', 'width', 'strand', 'score', 'left_motif', 'right_motif', 
+                                                                    'max_reads','samples_count','coverage_sum','coverage_avg','coverage_median','source_dataset_id'))
+
+splicevault = fread('data/300KRNA_ensembl.tsv.gz')
+```
+
+```{r}
+maxreads[strand == '+', `:=` (donor_pos = start, acceptor_pos = end)]
+maxreads[strand == '-', `:=` (donor_pos = end, acceptor_pos = start)]
+maxreads[, chr := gsub('chr', '', chrom)]
+
+splicevault_maxreads = maxreads[, .(chr, strand, donor_pos, acceptor_pos, max_reads)][splicevault, on = .(chr, strand,donor_pos, acceptor_pos)]
+```
+
+```{r}
+fwrite(splicevault_maxreads, 'data/300KRNA_ensembl_maxreads.tsv.gz')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
