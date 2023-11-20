@@ -7,6 +7,8 @@ The SpliceVault VEP annotates Single Nucleotide Polymorphisms (SNPs) that are pr
 ### SpliceVault_out_of_frame_events
 - The fraction of the Top4 events which cause a frameshift in the format:  
   `Frameshift: {number of Top4 events causing frameshift}/{either 4, or the total number of mis-splicing events detected at this site if less than 4}`
+- As reported in Dawes et al ([link](https://www.nature.com/articles/s41588-022-01293-8)), sites with 3/4 or more in-frame events (or all in-frame events) are likely to be splice-rescue and not LoF
+
 
 ### SpliceVault_Top4_Events
 - Details on the Top4 events and how they impact the transcript. Events are pipe-delimited and each event is supplied in the following format:
