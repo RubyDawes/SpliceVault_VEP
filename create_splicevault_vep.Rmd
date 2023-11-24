@@ -103,13 +103,16 @@ splicevaultVEP[ss_type == 'acceptor',  `:=` (start = ifelse(strand == '+', splic
                                                 end = ifelse(strand == '+', splice_site_pos + 3, splice_site_pos + 16))]
 splicevaultVEP[ss_type == 'donor',  `:=` (start = ifelse(strand == '+', splice_site_pos - 3, splice_site_pos -7), 
                                                 end = ifelse(strand == '+', splice_site_pos + 7, splice_site_pos +3))]
-splicevaultVEP[, genomic_range := paste0(start, '-', end)]
+#splicevaultVEP[, genomic_range := paste0(start, '-', end)]
 
 setorder(splicevaultVEP, chrom, start, transcript_id)
 
-splicevaultVEP_final = splicevaultVEP[, .(Feature = transcript_id, chrom, genomic_range, sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+splicevaultVEP_final = splicevaultVEP[, .(chrom, start, end, splice_site_pos, Feature = transcript_id, sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+fwrite(splicevaultVEP_final, 'output/splicevault_vep.tsv', sep = '\t')
+system('bgzip -f output/splicevault_vep.tsv')
+system('tabix -f output/splicevault_vep.tsv.gz -s1 -b2 -e3 -S1')
 
-fwrite(splicevaultVEP_final, 'output/splicevault_vep.tsv.gz')
+
 ```
 
 

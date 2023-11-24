@@ -3,6 +3,9 @@
 The SpliceVault VEP annotates Single Nucleotide Polymorphisms (SNPs) that are predicted to decrease the strength of annotated splice-sites by SpliceAI (DL > 0.2 or AL > 0.2 in precomputed scores). For these variants, SpliceVault can provide information on the likely mis-splicing outcomes for the transcript and whether these outcomes will cause a frameshift.
 
 ## VEP Output Columns Added by SpliceVault Plugin
+### SpliceVault_site
+- the splice-site predicted to be lost by SpliceAI. Format: `{splice_site_lost (donor or acceptor)}|chrom:position`
+- Cryptic positions are relative to this genomic coordinate.
 
 ### SpliceVault_out_of_frame_events
 - The fraction of the Top4 events which cause a frameshift in the format:  

@@ -13,21 +13,29 @@ library(GenomicRanges)
 splicevault_vep = fread('output/splicevault_vep.tsv.gz')
 spliceai_ssloss = fread('data/spliceai_ssloss.txt.gz', sep = '\t', col.names = c('chrom', 'pos', NA, 'ref', 'alt', NA, NA, 'score'))
 
+# find splice-site that delta is for
+spliceai_ssloss[, `:=` (AL = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 4)),
+                        AL_p = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 8)),
+                        DL = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 6)),
+                        DL_p = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 10)))]
+spliceai_ssloss[, ss_pos := ifelse(AL > 0.2, pos + AL_p, pos + DL_p)]
+spliceai_ssloss[, ss_type := ifelse(AL > 0.2, 'Acceptor_loss', 'Donor_loss')]
 
-splicevault_vep[, start := as.numeric(sapply(strsplit(genomic_range, '\\-'), '[[', 1))]
-splicevault_vep[, end := as.numeric(sapply(strsplit(genomic_range, '\\-'), '[[', 2))]
-
+# do foverlap based on splice-site that delta is for
 spliceai_ssloss[, chrom := paste0('chr', chrom)]
-spliceai_ssloss[, `:=` (start = pos, end = pos)]
-spliceai_ssloss_pos = unique(spliceai_ssloss[, .(chrom, pos, ref, alt, start, end)])
+spliceai_ssloss[, `:=` (start = ss_pos, end = ss_pos)]
 
+spliceai_ssloss_pos = unique(spliceai_ssloss[, .(chrom, pos, ref, alt, start, end, ss_pos, ss_type)])
+
+splicevault_vep[, `:=` (start = splice_site_pos - 1, end = splice_site_pos + 1)]
 setkey(splicevault_vep, chrom, start, end)
 splicevault_vep_pos = foverlaps(spliceai_ssloss_pos, splicevault_vep, type = 'within')
-splicevault_vep_pos = splicevault_vep_pos[!is.na(genomic_range)]
+splicevault_vep_pos = splicevault_vep_pos[!is.na(Feature)]
+
 splicevault_vep_pos[, `:=` (start = NULL, end = NULL, i.start = NULL, i.end = NULL)]
-
-splicevault_vep_saisnps = splicevault_vep_pos[, .(chrom, Feature, pos, ref, alt, sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+splicevault_vep_pos[ss_pos == splice_site_pos + 1]
+splicevault_vep_saisnps = splicevault_vep_pos[, .(chrom, Feature, pos, ref, alt, sv_splice_site_lost = paste0(ss_type,'|',chrom, ':', splice_site_pos), sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
 fwrite(splicevault_vep_saisnps, 'output/splicevault_vep_saisnps.tsv.gz')
-
+splicevault_vep_saisnps
 ```
 

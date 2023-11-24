@@ -1,0 +1,59 @@
+---
+title: "R Notebook"
+output: 
+---
+
+```{r}
+library(data.table)
+test_output = fread('data/batch_n92_vep.txt')
+test_output = test_output[SPLICEVAULT_END != '-' & final_highconf.gtf.gz == '-', c(1:7, 15,17, 45:50)]
+
+```
+
+
+```{r}
+manual_edit = fread('output/splicevault_vep_saisnps.tsv.gz')
+manual_edit[, Location := paste(chrom, pos, sep = ':')]
+#manual_edit = manual_edit[Location %in% test_output$Location]
+manual_edit[sv_top1=='', total_events := 0]
+manual_edit[sv_top2=='' & is.na(total_events), total_events := 1]
+manual_edit[sv_top3==''  & is.na(total_events), total_events := 2]
+manual_edit[sv_top4==''  & is.na(total_events), total_events := 3]
+manual_edit[is.na(total_events), total_events := 4]
+```
+
+
+```{r}
+# set SpliceVault_out_of_frame_events to NA for noncoding transcripts
+```
+
+
+```{r}
+
+manual_edit_vep = manual_edit[, .(Location, Allele = alt, Feature, SpliceVault_site = sv_splice_site_lost, SpliceVault_out_of_frame_events = paste0('Frameshift:',sv_top4_outOfFrame, '/', total_events), 
+                SpliceVault_Top4_Events = paste(ifelse(sv_top1 == '', '', paste0('Top1:',sv_top1)), 
+                                                ifelse(sv_top2 == '', '', paste0('Top2:',sv_top2)), 
+                                                ifelse(sv_top3 == '', '', paste0('Top3:',sv_top3)),
+                                                ifelse(sv_top4 == '', '', paste0('Top4:',sv_top4)), sep = '|'), 
+                SpliceVault_site_info = paste0('sample_count:',sv_annotatedSplicingSampleCount,',max_depth_gtex:', sv_annotatedSplicingMaxReadsGTEx))]
+
+manual_edit_vep[, SpliceVault_Top4_Events := gsub('\\|\\||\\|$','', SpliceVault_Top4_Events)]
+fwrite(manual_edit_vep, 'output/splicevault_data.tsv.gz', sep = '\t')
+
+```
+
+
+
+```{r}
+
+manual_output = test_output[!grepl('NMD', Consequence), c(1:10)]
+manual_output = manual_output[manual_edit_vep, on = .(Location, Allele, Feature)][!is.na(Consequence)]
+manual_output[grepl('non_coding', Consequence), SpliceVault_out_of_frame_events := 'noCDS']
+
+manual_output[SpliceVault_out_of_frame_events %in% c('3/4', '4/4')]
+
+fwrite(manual_output[-which(duplicated(manual_output[, .(Location, Allele)]))], 'output/splicevault_vep_manual_sample.tsv', sep = '\t')
+```
+
+
+
