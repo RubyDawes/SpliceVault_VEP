@@ -12,20 +12,31 @@ library(GenomicRanges)
 ```{r}
 splicevault_vep = fread('output/splicevault_vep.tsv.gz')
 spliceai_ssloss = fread('data/spliceai_ssloss.txt.gz', sep = '\t', col.names = c('chrom', 'pos', NA, 'ref', 'alt', NA, NA, 'score'))
+spliceai_indel_ssloss = fread('data/spliceai_indel_ssloss.txt.gz', sep = '\t', col.names = c('chrom', 'pos', NA, 'ref', 'alt', NA, NA, 'score'))
+```
 
+```{r}
+spliceai_ssloss = rbind(spliceai_ssloss, spliceai_indel_ssloss)
+rm(spliceai_indel_ssloss)
+```
+
+
+
+```{r}
 # find splice-site that delta is for
 spliceai_ssloss[, `:=` (AL = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 4)),
                         AL_p = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 8)),
                         DL = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 6)),
                         DL_p = as.numeric(sapply(strsplit(score, '|', fixed = TRUE),'[[', 10)))]
 spliceai_ssloss[, ss_pos := ifelse(AL > 0.2, pos + AL_p, pos + DL_p)]
-spliceai_ssloss[, ss_type := ifelse(AL > 0.2, 'Acceptor_loss', 'Donor_loss')]
+spliceai_ssloss[AL > 0.2, `:=` (ss_type = 'Acceptor_loss', ss_delta = AL)]
+spliceai_ssloss[DL > 0.2, `:=` (ss_type = 'Donor_loss', ss_delta = DL)]
 
 # do foverlap based on splice-site that delta is for
 spliceai_ssloss[, chrom := paste0('chr', chrom)]
 spliceai_ssloss[, `:=` (start = ss_pos, end = ss_pos)]
 
-spliceai_ssloss_pos = unique(spliceai_ssloss[, .(chrom, pos, ref, alt, start, end, ss_pos, ss_type)])
+spliceai_ssloss_pos = unique(spliceai_ssloss[, .(chrom, pos, ref, alt, start, end, ss_pos, ss_type, ss_delta)])
 
 splicevault_vep[, `:=` (start = splice_site_pos - 1, end = splice_site_pos + 1)]
 setkey(splicevault_vep, chrom, start, end)
@@ -33,9 +44,53 @@ splicevault_vep_pos = foverlaps(spliceai_ssloss_pos, splicevault_vep, type = 'wi
 splicevault_vep_pos = splicevault_vep_pos[!is.na(Feature)]
 
 splicevault_vep_pos[, `:=` (start = NULL, end = NULL, i.start = NULL, i.end = NULL)]
-splicevault_vep_pos[ss_pos == splice_site_pos + 1]
-splicevault_vep_saisnps = splicevault_vep_pos[, .(chrom, Feature, pos, ref, alt, sv_splice_site_lost = paste0(ss_type,'|',chrom, ':', splice_site_pos), sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
-fwrite(splicevault_vep_saisnps, 'output/splicevault_vep_saisnps.tsv.gz')
-splicevault_vep_saisnps
+
+
+splicevault_vep_sai = splicevault_vep_pos[, .(chrom, Feature, pos, ref, alt, sv_splice_site_type = ss_type, spliceVault_site_loc = paste0(chrom, ':', splice_site_pos), ss_delta, sv_annotatedSplicingSampleCount, sv_annotatedSplicingMaxReadsGTEx, sv_top4_outOfFrame, sv_top1, sv_top2, sv_top3, sv_top4)]
+rm(spliceai_ssloss, spliceai_ssloss_pos, splicevault_vep, splicevault_vep_pos)
+
 ```
+
+
+```{r}
+splicevault_vep_sai[sv_top1=='', total_events := 0]
+splicevault_vep_sai[sv_top2=='' & is.na(total_events), total_events := 1]
+splicevault_vep_sai[sv_top3==''  & is.na(total_events), total_events := 2]
+splicevault_vep_sai[sv_top4==''  & is.na(total_events), total_events := 3]
+splicevault_vep_sai[is.na(total_events), total_events := 4]
+
+splicevault_vep_sai[, SpliceVault_Top4_Events :=  paste(ifelse(sv_top1 == '', '', paste0('Top1:',sv_top1)), 
+                                                ifelse(sv_top2 == '', '', paste0('Top2:',sv_top2)), 
+                                                ifelse(sv_top3 == '', '', paste0('Top3:',sv_top3)),
+                                                ifelse(sv_top4 == '', '', paste0('Top4:',sv_top4)), sep = '|')]
+splicevault_vep_sai[, SpliceVault_Top4_Events := gsub('\\|\\||\\|$','', SpliceVault_Top4_Events)]
+
+splicevault_vep_sai[, `:=` (sv_top1 = NULL, sv_top2 = NULL, sv_top3 = NULL, sv_top4 = NULL)]
+
+splicevault_vep_sai[, spliceVault_out_of_frame_events := paste0('Frameshift:',sv_top4_outOfFrame, '/', total_events)]
+
+names(splicevault_vep_sai) = tolower(names(splicevault_vep_sai))
+
+splicevault_vep_sai = splicevault_vep_sai[, .(chrom, pos, ref, alt, transcript_id = feature, 
+                                  splicevault_site_type = sv_splice_site_type,
+                                  splicevault_site_loc,
+                                  spliceai_delta = ss_delta,
+                                  splicevault_out_of_frame_events, 
+                                  splicevault_top4_events, 
+                                  splicevault_site_sample_count = sv_annotatedsplicingsamplecount,
+                                  splicevault_site_max_depth = sv_annotatedsplicingmaxreadsgtex)]
+setorder(splicevault_vep_sai, chrom, pos)
+fwrite(splicevault_vep_sai, 'output/splicevault_data.tsv.gz', sep = '\t')
+
+```
+
+
+
+
+
+
+
+
+
+
 
